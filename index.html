@@ -622,61 +622,76 @@
   </div>
 
   <script type="module">
-  import { ImagePool } from "https://cdn.jsdelivr.net/npm/@squoosh/lib@0.5.0/+esm";
+import { ImagePool } from "https://cdn.jsdelivr.net/npm/@squoosh/lib@0.5.0/+esm";
 
-  // --- Config ---
-  const MAX_DIMENSION = 2500;      // largest side allowed before downscale
-  const MAX_PIXELS = 8_000_000;    // ~8 MP threshold for scaling
-  const ENTROPY_SAMPLE = 256;      // sample size used for entropy estimate
-  const TWO_PASS_ENCODE = true;    // try a higher-effort second pass and pick best
-  const DEFAULT_QUALITY = 0.80;
+// --- Config ---
+const MAX_DIMENSION = 2500;
+const MAX_PIXELS = 8_000_000;
+const ENTROPY_SAMPLE = 256;
+const TWO_PASS_ENCODE = true;
+const DEFAULT_QUALITY = 0.80;
 
-  // --- State & DOM refs ---
-  let currentImage = null;
-  let isDragging = false;
+// --- State & DOM refs ---
+let currentImage = null;
+let isDragging = false;
 
-  const uploadZone = document.getElementById('uploadZone');
-  const fileInput = document.getElementById('fileInput');
-  const previewModal = document.getElementById('previewModal');
-  const sliderHandle = document.getElementById('sliderHandle');
-  const compressedLayer = document.getElementById('compressedLayer');
-  const qualitySlider = document.getElementById('qualitySlider');
-  const processingOverlay = document.getElementById('processingOverlay');
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+const previewModal = document.getElementById('previewModal');
+const sliderHandle = document.getElementById('sliderHandle');
+const compressedLayer = document.getElementById('compressedLayer');
+const qualitySlider = document.getElementById('qualitySlider');
+const processingOverlay = document.getElementById('processingOverlay');
 
-  // --- UI wiring ---
-  uploadZone.addEventListener('click', () => fileInput.click());
+if (!uploadZone || !fileInput) {
+  console.error('Missing required DOM elements: uploadZone or fileInput');
+}
 
-  uploadZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    uploadZone.classList.add('dragover');
-  });
+// --- UI wiring ---
+uploadZone.addEventListener('click', () => fileInput.click());
 
-  uploadZone.addEventListener('dragleave', () => {
-    uploadZone.classList.remove('dragover');
-  });
+uploadZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  uploadZone.classList.add('dragover');
+});
 
-  uploadZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    uploadZone.classList.remove('dragover');
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
-    if (files.length > 0) handleFile(files[0]);
-  });
+uploadZone.addEventListener('dragleave', () => {
+  uploadZone.classList.remove('dragover');
+});
 
-  fileInput.addEventListener('change', (e) => {
-    if (e.target.files.length > 0) handleFile(e.target.files[0]);
-  });
+uploadZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  // prefer files, fallback to items
+  let files = [];
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+    files = Array.from(e.dataTransfer.files).filter(f => f.type && f.type.startsWith('image/'));
+  } else if (e.dataTransfer && e.dataTransfer.items) {
+    files = Array.from(e.dataTransfer.items)
+      .map(it => it.getAsFile ? it.getAsFile() : null)
+      .filter(Boolean)
+      .filter(f => f.type && f.type.startsWith('image/'));
+  }
+  if (files.length > 0) handleFile(files[0]);
+});
 
-  qualitySlider.addEventListener('input', (e) => {
-    document.getElementById('qualityValue').textContent = e.target.value + '%';
-  });
+fileInput.addEventListener('change', (e) => {
+  if (e.target.files && e.target.files.length > 0) handleFile(e.target.files[0]);
+});
 
-  qualitySlider.addEventListener('change', async (e) => {
-    const quality = e.target.value / 100;
-    await compressWithQuality(quality);
-  });
+qualitySlider.addEventListener('input', (e) => {
+  document.getElementById('qualityValue').textContent = e.target.value + '%';
+});
 
-  // --- Main handlers ---
-  async function handleFile(file) {
+qualitySlider.addEventListener('change', async (e) => {
+  const quality = e.target.value / 100;
+  await compressWithQuality(quality);
+});
+
+// --- Main handlers ---
+async function handleFile(file) {
+  try {
+    if (!file) return;
     currentImage = {
       file,
       name: file.name,
@@ -694,47 +709,51 @@
     previewModal.classList.add('active');
     await compressWithQuality(DEFAULT_QUALITY);
     updateSliderPosition(50);
+  } catch (err) {
+    console.error('handleFile error:', err);
+    alert('Failed to load image — check console for details.');
   }
+}
 
-  async function compressWithQuality(quality) {
-    if (!currentImage || !currentImage.img) return;
+async function compressWithQuality(quality) {
+  if (!currentImage || !currentImage.img) return;
 
-    processingOverlay.classList.add('active');
-    // slight delay to allow overlay paint
-    await new Promise(r => setTimeout(r, 80));
+  processingOverlay.classList.add('active');
+  await new Promise(r => setTimeout(r, 80));
 
-    try {
-      const compressed = await advancedCompress(currentImage.img, quality, currentImage.type);
+  try {
+    const compressed = await advancedCompress(currentImage.img, quality, currentImage.type);
 
-      // Revoke old objectURL if present
-      if (currentImage.compressed && currentImage.compressedUrl) {
-        URL.revokeObjectURL(currentImage.compressedUrl);
-      }
-
-      currentImage.compressed = compressed.blob;
-      currentImage.compressedUrl = compressed.dataUrl;
-      currentImage.compressedSize = compressed.blob.size;
-
-      document.getElementById('compressedImg').src = compressed.dataUrl;
-      document.getElementById('compressedSize').textContent = formatBytes(compressed.blob.size);
-
-      const savings = ((1 - compressed.blob.size / currentImage.originalSize) * 100).toFixed(1);
-      document.getElementById('savings').textContent = savings + '%';
-    } catch (err) {
-      console.error('Compression failed:', err);
-    } finally {
-      processingOverlay.classList.remove('active');
+    if (currentImage.compressedUrl) {
+      try { URL.revokeObjectURL(currentImage.compressedUrl); } catch (e) {}
+      currentImage.compressedUrl = null;
     }
+
+    currentImage.compressed = compressed.blob;
+    currentImage.compressedUrl = compressed.dataUrl;
+    currentImage.compressedSize = compressed.blob.size;
+
+    document.getElementById('compressedImg').src = compressed.dataUrl;
+    document.getElementById('compressedSize').textContent = formatBytes(compressed.blob.size);
+
+    const savings = ((1 - compressed.blob.size / currentImage.originalSize) * 100).toFixed(1);
+    document.getElementById('savings').textContent = savings + '%';
+  } catch (err) {
+    console.error('Compression failed:', err);
+    alert('Compression failed — check console for details.');
+  } finally {
+    processingOverlay.classList.remove('active');
   }
+}
 
-  // --- Advanced compression pipeline ---
-  async function advancedCompress(img, quality, mimeType) {
-    // Create a canvas (Offscreen if available)
-    const useOffscreen = typeof OffscreenCanvas !== 'undefined';
-    const sampleCanvas = useOffscreen ? new OffscreenCanvas(img.width, img.height) : document.createElement('canvas');
-    const ctx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+// --- Advanced compression pipeline (safer, no OffscreenCanvas) ---
+async function advancedCompress(img, quality, mimeType) {
+  try {
+    // Use standard canvas for maximum compatibility
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    // Determine scale (only downscale when above thresholds)
+    // Determine scale
     let scale = 1;
     if (img.width * img.height > MAX_PIXELS) {
       scale = Math.min(scale, Math.sqrt(MAX_PIXELS / (img.width * img.height)));
@@ -743,18 +762,17 @@
       scale = Math.min(scale, MAX_DIMENSION / Math.max(img.width, img.height));
     }
 
-    sampleCanvas.width = Math.max(1, Math.round(img.width * scale));
-    sampleCanvas.height = Math.max(1, Math.round(img.height * scale));
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, 0, 0, sampleCanvas.width, sampleCanvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // Estimate local entropy to decide codec
-    const entropy = await estimateEntropy(ctx, sampleCanvas);
-    // Higher entropy -> favor AVIF (better for photos); lower -> WebP (good for graphics)
+    // Entropy estimate (safe)
+    const entropy = await estimateEntropy(ctx, canvas);
     let targetType = entropy > 5.0 ? 'image/avif' : 'image/webp';
 
-    // Try to confirm support, fallback to webp if avif not available
+    // Confirm support; fallback to webp
     try {
       const test = document.createElement('canvas').toDataURL(targetType);
       if (!test.startsWith(`data:${targetType}`)) targetType = 'image/webp';
@@ -762,198 +780,194 @@
       targetType = 'image/webp';
     }
 
-    // Prepare PNG blob to feed ImagePool (lossless source for best results)
-    const sourceBlob = await (sampleCanvas.convertToBlob ? sampleCanvas.convertToBlob({ type: 'image/png' }) : new Promise(res => sampleCanvas.toBlob(res, 'image/png')));
+    // get a PNG blob (lossless source)
+    const sourceBlob = await new Promise((res) => {
+      if (canvas.convertToBlob) {
+        canvas.convertToBlob({ type: 'image/png' }).then(res).catch(() => canvas.toBlob(res, 'image/png'));
+      } else {
+        canvas.toBlob(res, 'image/png');
+      }
+    });
 
     const pool = new ImagePool(navigator.hardwareConcurrency || 2);
     const image = pool.ingestImage(sourceBlob);
 
-    // configure encoders based on targetType and quality
-    const codec = targetType.split('/')[1]; // 'avif' or 'webp'
-    const lossless = quality >= 0.995; // treat near-100% as lossless intent
+    const codec = targetType.split('/')[1];
+    const lossless = quality >= 0.995;
 
-    // base encoder options
     const baseEncoders = {
       avif: { cqLevel: Math.round((1 - quality) * 62), effort: 4, lossless: !!lossless },
       webp: { quality: Math.round(quality * 100), lossless: !!lossless },
       mozjpeg: { quality: Math.round(quality * 100) }
     };
 
-    // Helper to run an encode and return the encoded result object
     const runEncode = async (encOptions) => {
-      // clear previously encoded results to avoid mixing (squoosh may override)
       await image.encode(encOptions);
       const encoded = image.encodedWith.avif || image.encodedWith.webp || image.encodedWith.mozjpeg;
       if (!encoded) throw new Error('No encoded result returned');
-      // clone binary into a Blob
-      const mime = encoded.mimeType || targetType;
-      const binary = encoded.binary;
-      return { binary, mime, size: binary.byteLength };
+      return { binary: encoded.binary, mime: encoded.mimeType || targetType, size: encoded.binary.byteLength };
     };
 
-    // First pass (faster / medium effort)
+    // First pass
     let chosen;
     try {
-      const encOptions1 = { [codec]: { ...baseEncoders[codec], effort: baseEncoders[codec].effort || 4 } };
-      const pass1 = await runEncode(encOptions1);
+      const enc1 = { [codec]: { ...baseEncoders[codec], effort: baseEncoders[codec].effort || 4 } };
+      const pass1 = await runEncode(enc1);
       chosen = pass1;
 
-      // Second, higher-effort pass (if enabled) to try and squeeze out more savings
       if (TWO_PASS_ENCODE) {
-        const encOptions2 = { [codec]: { ...baseEncoders[codec], effort: (baseEncoders[codec].effort || 4) + 2 } };
-        await image.encode(encOptions2);
+        const enc2 = { [codec]: { ...baseEncoders[codec], effort: (baseEncoders[codec].effort || 4) + 2 } };
+        await image.encode(enc2);
         const pass2 = image.encodedWith.avif || image.encodedWith.webp || image.encodedWith.mozjpeg;
         if (pass2 && pass2.binary && pass2.binary.byteLength < pass1.binary.byteLength) {
           chosen = { binary: pass2.binary, mime: pass2.mimeType || targetType, size: pass2.binary.byteLength };
-        } else {
-          // keep pass1 result
         }
       }
     } catch (err) {
-      console.warn('Two-pass encode failed / skipped, falling back to single pass', err);
-      // fallback: try a safe encode with webp
+      console.warn('Two-pass encode failed, trying fallback webp:', err);
       try {
         await image.encode({ webp: baseEncoders.webp });
         const fallback = image.encodedWith.webp;
         chosen = { binary: fallback.binary, mime: 'image/webp', size: fallback.binary.byteLength };
       } catch (err2) {
-        // As last resort, return original PNG blob
+        console.error('Fallback encode failed:', err2);
         await pool.close();
         return { blob: sourceBlob, dataUrl: URL.createObjectURL(sourceBlob) };
       }
     }
 
-    // Build final blob & url
     const finalBlob = new Blob([chosen.binary], { type: chosen.mime });
     const finalUrl = URL.createObjectURL(finalBlob);
-
     await pool.close();
     return { blob: finalBlob, dataUrl: finalUrl };
+  } catch (err) {
+    console.error('advancedCompress top-level error:', err);
+    throw err;
   }
+}
 
-  // --- Entropy estimation (sampled) ---
-  async function estimateEntropy(ctx, canvas) {
-    // sample a block up to ENTROPY_SAMPLE x ENTROPY_SAMPLE
-    const w = Math.min(canvas.width, ENTROPY_SAMPLE);
-    const h = Math.min(canvas.height, ENTROPY_SAMPLE);
-    try {
-      const imgd = ctx.getImageData(0, 0, w, h);
-      const data = imgd.data;
-      // compute grayscale histogram (luma)
-      const hist = new Uint32Array(256);
-      let total = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i], g = data[i + 1], b = data[i + 2];
-        // Rec. 601 luma
-        const luma = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-        hist[luma]++;
-        total++;
-      }
-      // Shannon entropy
-      let entropy = 0;
-      for (let i = 0; i < 256; i++) {
-        if (hist[i] === 0) continue;
-        const p = hist[i] / total;
-        entropy -= p * Math.log2(p);
-      }
-      return entropy; // roughly 0..8
-    } catch (err) {
-      // fallback value if getImageData fails (e.g., tainted)
-      console.warn('Entropy estimate failed:', err);
-      return 6.0;
+// --- Entropy estimation (sampled) ---
+async function estimateEntropy(ctx, canvas) {
+  const w = Math.min(canvas.width, ENTROPY_SAMPLE);
+  const h = Math.min(canvas.height, ENTROPY_SAMPLE);
+  try {
+    const imgd = ctx.getImageData(0, 0, w, h);
+    const data = imgd.data;
+    const hist = new Uint32Array(256);
+    let total = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const luma = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+      hist[luma]++;
+      total++;
     }
+    let entropy = 0;
+    for (let i = 0; i < 256; i++) {
+      if (hist[i] === 0) continue;
+      const p = hist[i] / total;
+      entropy -= p * Math.log2(p);
+    }
+    return entropy;
+  } catch (err) {
+    console.warn('Entropy estimate failed:', err);
+    return 6.0;
   }
+}
 
-  // --- Utilities ---
-  function loadImage(file) {
-    return new Promise((resolve, reject) => {
+// --- Utilities ---
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    try {
       const reader = new FileReader();
       reader.onload = (e) => {
         const img = new Image();
         img.onload = () => resolve(img);
         img.onerror = (er) => reject(er);
+        // ensure we set crossOrigin to anonymous only if needed; for DataURL it's not needed.
         img.src = e.target.result;
       };
       reader.onerror = (e) => reject(e);
       reader.readAsDataURL(file);
-    });
-  }
-
-  function downloadCompressed() {
-    if (!currentImage || !currentImage.compressed) return;
-    const url = currentImage.compressedUrl || URL.createObjectURL(currentImage.compressed);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'compressed_' + currentImage.name;
-    a.click();
-    // If we created a temporary object URL, revoke it after a short delay to avoid interfering with download on some browsers
-    setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
-    }, 1000);
-  }
-
-  function closePreview() {
-    previewModal.classList.remove('active');
-    fileInput.value = '';
-    // revoke object URLs if any
-    if (currentImage && currentImage.compressedUrl) {
-      try { URL.revokeObjectURL(currentImage.compressedUrl); } catch (e) {}
+    } catch (err) {
+      reject(err);
     }
-    currentImage = null;
+  });
+}
+
+function downloadCompressed() {
+  if (!currentImage || !currentImage.compressed) return;
+  const url = currentImage.compressedUrl || URL.createObjectURL(currentImage.compressed);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'compressed_' + currentImage.name;
+  a.click();
+  setTimeout(() => {
+    try { URL.revokeObjectURL(url); } catch (e) {}
+  }, 1000);
+}
+
+function closePreview() {
+  previewModal.classList.remove('active');
+  fileInput.value = '';
+  if (currentImage && currentImage.compressedUrl) {
+    try { URL.revokeObjectURL(currentImage.compressedUrl); } catch (e) {}
   }
+  currentImage = null;
+}
 
-  function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
-  }
+function formatBytes(bytes) {
+  if (!bytes) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+}
 
-  // --- Slider (unchanged) ---
-  function initSlider() {
-    sliderHandle.addEventListener('mousedown', startDragging);
-    sliderHandle.addEventListener('touchstart', startDragging, { passive: false });
+// --- Slider ---
+function initSlider() {
+  sliderHandle.addEventListener('mousedown', startDragging);
+  sliderHandle.addEventListener('touchstart', startDragging, { passive: false });
 
-    document.addEventListener('mousemove', drag);
-    document.addEventListener('touchmove', drag, { passive: false });
+  document.addEventListener('mousemove', drag);
+  document.addEventListener('touchmove', drag, { passive: false });
 
-    document.addEventListener('mouseup', stopDragging);
-    document.addEventListener('touchend', stopDragging);
-  }
+  document.addEventListener('mouseup', stopDragging);
+  document.addEventListener('touchend', stopDragging);
+}
 
-  function startDragging(e) {
-    isDragging = true;
-    e.preventDefault();
-  }
+function startDragging(e) {
+  isDragging = true;
+  e.preventDefault();
+}
 
-  function drag(e) {
-    if (!isDragging) return;
-    const container = document.getElementById('comparisonImages');
-    const rect = container.getBoundingClientRect();
-    const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
-    const x = clientX - rect.left;
-    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
-    updateSliderPosition(percentage);
-  }
+function drag(e) {
+  if (!isDragging) return;
+  const container = document.getElementById('comparisonImages');
+  const rect = container.getBoundingClientRect();
+  const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+  const x = clientX - rect.left;
+  const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
+  updateSliderPosition(percentage);
+}
 
-  function stopDragging() {
-    isDragging = false;
-  }
+function stopDragging() {
+  isDragging = false;
+}
 
-  function updateSliderPosition(percentage) {
-    sliderHandle.style.left = percentage + '%';
-    compressedLayer.style.width = percentage + '%';
-  }
+function updateSliderPosition(percentage) {
+  sliderHandle.style.left = percentage + '%';
+  compressedLayer.style.width = percentage + '%';
+}
 
-  // --- Init ---
-  initSlider();
+// --- Init ---
+initSlider();
 
-  // expose some functions to global if needed by HTML buttons
-  window.handleFile = handleFile;
-  window.downloadCompressed = downloadCompressed;
-  window.closePreview = closePreview;
+// expose controls for HTML buttons
+window.handleFile = handleFile;
+window.downloadCompressed = downloadCompressed;
+window.closePreview = closePreview;
 </script>
+
 
 
 </body>

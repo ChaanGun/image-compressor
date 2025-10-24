@@ -650,6 +650,9 @@ const sliderHandle = document.getElementById('sliderHandle');
 const compressedLayer = document.getElementById('compressedLayer');
 const qualitySlider = document.getElementById('qualitySlider');
 const processingOverlay = document.getElementById('processingOverlay');
+// --- Prevent browser navigation on accidental file drop ---
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
 
 if (!uploadZone || !fileInput) {
   console.error('Missing required DOM elements: uploadZone or fileInput');

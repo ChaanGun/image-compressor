@@ -621,270 +621,209 @@
     </div>
   </div>
 
-  <script>
-    let currentImage = null;
-    let isDragging = false;
+  <script type="module">
+  import { ImagePool } from "https://cdn.jsdelivr.net/npm/@squoosh/lib@0.5.0/+esm";
 
-    const uploadZone = document.getElementById('uploadZone');
-    const fileInput = document.getElementById('fileInput');
-    const previewModal = document.getElementById('previewModal');
-    const sliderHandle = document.getElementById('sliderHandle');
-    const compressedLayer = document.getElementById('compressedLayer');
-    const qualitySlider = document.getElementById('qualitySlider');
-    const processingOverlay = document.getElementById('processingOverlay');
+  let currentImage = null;
+  let isDragging = false;
 
-    uploadZone.addEventListener('click', () => fileInput.click());
+  const uploadZone = document.getElementById('uploadZone');
+  const fileInput = document.getElementById('fileInput');
+  const previewModal = document.getElementById('previewModal');
+  const sliderHandle = document.getElementById('sliderHandle');
+  const compressedLayer = document.getElementById('compressedLayer');
+  const qualitySlider = document.getElementById('qualitySlider');
+  const processingOverlay = document.getElementById('processingOverlay');
 
-    uploadZone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      uploadZone.classList.add('dragover');
-    });
+  uploadZone.addEventListener('click', () => fileInput.click());
 
-    uploadZone.addEventListener('dragleave', () => {
-      uploadZone.classList.remove('dragover');
-    });
+  uploadZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    uploadZone.classList.add('dragover');
+  });
 
-    uploadZone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      uploadZone.classList.remove('dragover');
-      const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
-      if (files.length > 0) handleFile(files[0]);
-    });
+  uploadZone.addEventListener('dragleave', () => {
+    uploadZone.classList.remove('dragover');
+  });
 
-    fileInput.addEventListener('change', (e) => {
-      if (e.target.files.length > 0) handleFile(e.target.files[0]);
-    });
+  uploadZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadZone.classList.remove('dragover');
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+    if (files.length > 0) handleFile(files[0]);
+  });
 
-    async function handleFile(file) {
-      currentImage = {
-        file: file,
-        name: file.name,
-        originalSize: file.size,
-        type: file.type
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) handleFile(e.target.files[0]);
+  });
+
+  async function handleFile(file) {
+    currentImage = {
+      file: file,
+      name: file.name,
+      originalSize: file.size,
+      type: file.type
+    };
+
+    const img = await loadImage(file);
+    currentImage.img = img;
+
+    document.getElementById('modalTitle').textContent = file.name;
+    document.getElementById('originalImg').src = img.src;
+    document.getElementById('originalSize').textContent = formatBytes(file.size);
+
+    previewModal.classList.add('active');
+    await compressWithQuality(0.8);
+    updateSliderPosition(50);
+  }
+
+  async function compressWithQuality(quality) {
+    processingOverlay.classList.add('active');
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    const compressed = await advancedCompress(currentImage.img, quality, currentImage.type);
+    currentImage.compressed = compressed.blob;
+    currentImage.compressedSize = compressed.blob.size;
+
+    document.getElementById('compressedImg').src = compressed.dataUrl;
+    document.getElementById('compressedSize').textContent = formatBytes(compressed.blob.size);
+
+    const savings = ((1 - compressed.blob.size / currentImage.originalSize) * 100).toFixed(1);
+    document.getElementById('savings').textContent = savings + '%';
+
+    processingOverlay.classList.remove('active');
+  }
+
+  async function advancedCompress(img, quality, mimeType) {
+    // Detect supported modern formats (AVIF > WebP > original)
+    let targetType = 'image/avif';
+    try {
+      const test = document.createElement('canvas').toDataURL('image/avif');
+      if (!test.startsWith('data:image/avif')) targetType = 'image/webp';
+    } catch {
+      targetType = 'image/webp';
+    }
+
+    // Step 1: Downscale slightly if large
+    const MAX_DIMENSION = 2000;
+    let scale = Math.min(1, MAX_DIMENSION / Math.max(img.width, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width * scale;
+    canvas.height = img.height * scale;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    // Step 2: Get raw pixels (optional: could add ML segmentation here)
+    const imageBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+    const imagePool = new ImagePool(navigator.hardwareConcurrency || 2);
+    const image = imagePool.ingestImage(imageBlob);
+
+    // Step 3: Encode using advanced WebAssembly codecs
+    const encoders = {};
+    if (targetType === 'image/avif') {
+      encoders.avif = { cqLevel: Math.round((1 - quality) * 62), effort: 4 };
+    } else if (targetType === 'image/webp') {
+      encoders.webp = { quality: Math.round(quality * 100) };
+    } else {
+      encoders.mozjpeg = { quality: Math.round(quality * 100) };
+    }
+
+    await image.encode(encoders);
+    const encoded = image.encodedWith.avif || image.encodedWith.webp || image.encodedWith.mozjpeg;
+    const blob = new Blob([encoded.binary], { type: targetType });
+    const dataUrl = URL.createObjectURL(blob);
+
+    await imagePool.close();
+    return { blob, dataUrl };
+  }
+
+  // Slider
+  function initSlider() {
+    sliderHandle.addEventListener('mousedown', startDragging);
+    sliderHandle.addEventListener('touchstart', startDragging);
+
+    document.addEventListener('mousemove', drag);
+    document.addEventListener('touchmove', drag);
+
+    document.addEventListener('mouseup', stopDragging);
+    document.addEventListener('touchend', stopDragging);
+  }
+
+  function startDragging(e) {
+    isDragging = true;
+    e.preventDefault();
+  }
+
+  function drag(e) {
+    if (!isDragging) return;
+    const container = document.getElementById('comparisonImages');
+    const rect = container.getBoundingClientRect();
+    const x = (e.type.includes('touch') ? e.touches[0].clientX : e.clientX) - rect.left;
+    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
+    updateSliderPosition(percentage);
+  }
+
+  function stopDragging() {
+    isDragging = false;
+  }
+
+  function updateSliderPosition(percentage) {
+    sliderHandle.style.left = percentage + '%';
+    compressedLayer.style.width = percentage + '%';
+  }
+
+  qualitySlider.addEventListener('input', async (e) => {
+    const quality = e.target.value / 100;
+    document.getElementById('qualityValue').textContent = e.target.value + '%';
+  });
+
+  qualitySlider.addEventListener('change', async (e) => {
+    const quality = e.target.value / 100;
+    await compressWithQuality(quality);
+  });
+
+  function loadImage(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = e.target.result;
       };
-
-      const img = await loadImage(file);
-      currentImage.img = img;
-
-      document.getElementById('modalTitle').textContent = file.name;
-      document.getElementById('originalImg').src = img.src;
-      document.getElementById('originalSize').textContent = formatBytes(file.size);
-
-      previewModal.classList.add('active');
-      await compressWithQuality(0.8);
-      
-      // Initialize slider position
-      updateSliderPosition(50);
-    }
-
-    async function compressWithQuality(quality) {
-      processingOverlay.classList.add('active');
-      
-      // Simulate processing time for better UX
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      const compressed = await advancedCompress(currentImage.img, quality, currentImage.type);
-      currentImage.compressed = compressed.blob;
-      currentImage.compressedSize = compressed.blob.size;
-      
-      document.getElementById('compressedImg').src = compressed.dataUrl;
-      document.getElementById('compressedSize').textContent = formatBytes(compressed.blob.size);
-      
-      const savings = ((1 - compressed.blob.size / currentImage.originalSize) * 100).toFixed(1);
-      document.getElementById('savings').textContent = savings + '%';
-      
-      processingOverlay.classList.remove('active');
-    }
-
-    async function advancedCompress(img, quality, mimeType) {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      
-      canvas.width = img.width;
-      canvas.height = img.height;
-      
-      // Apply advanced compression with subject detection simulation
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, 0, 0);
-      
-      // Get image data for processing
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = imageData.data;
-      
-      // Simple edge detection to identify subject areas
-      const edges = detectEdges(imageData);
-      
-      // Apply selective blur to background areas
-      applySelectiveCompression(imageData, edges, quality);
-      
-      ctx.putImageData(imageData, 0, 0);
-      
-      return new Promise((resolve) => {
-        canvas.toBlob((blob) => {
-          resolve({ 
-            blob, 
-            dataUrl: canvas.toDataURL(mimeType, quality) 
-          });
-        }, mimeType, quality);
-      });
-    }
-
-    function detectEdges(imageData) {
-      const width = imageData.width;
-      const height = imageData.height;
-      const data = imageData.data;
-      const edges = new Uint8Array(width * height);
-      
-      // Sobel edge detection (simplified)
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-          const idx = (y * width + x) * 4;
-          
-          // Calculate gradient
-          const gx = (
-            -data[idx - 4 - width * 4] + data[idx + 4 - width * 4] +
-            -2 * data[idx - 4] + 2 * data[idx + 4] +
-            -data[idx - 4 + width * 4] + data[idx + 4 + width * 4]
-          );
-          
-          const gy = (
-            -data[idx - width * 4 - 4] - 2 * data[idx - width * 4] - data[idx - width * 4 + 4] +
-            data[idx + width * 4 - 4] + 2 * data[idx + width * 4] + data[idx + width * 4 + 4]
-          );
-          
-          const magnitude = Math.sqrt(gx * gx + gy * gy);
-          edges[y * width + x] = magnitude > 50 ? 255 : 0;
-        }
-      }
-      
-      return edges;
-    }
-
-    function applySelectiveCompression(imageData, edges, quality) {
-      const width = imageData.width;
-      const height = imageData.height;
-      const data = imageData.data;
-      const radius = Math.floor((1 - quality) * 3); // Blur radius based on quality
-      
-      if (radius < 1) return;
-      
-      // Apply slight blur to non-edge areas (background)
-      for (let y = radius; y < height - radius; y++) {
-        for (let x = radius; x < width - radius; x++) {
-          const idx = y * width + x;
-          
-          // Skip if it's an edge (subject area)
-          if (edges[idx] > 128) continue;
-          
-          let r = 0, g = 0, b = 0, count = 0;
-          
-          // Average surrounding pixels for background areas
-          for (let dy = -radius; dy <= radius; dy++) {
-            for (let dx = -radius; dx <= radius; dx++) {
-              const pixelIdx = ((y + dy) * width + (x + dx)) * 4;
-              r += data[pixelIdx];
-              g += data[pixelIdx + 1];
-              b += data[pixelIdx + 2];
-              count++;
-            }
-          }
-          
-          const currentIdx = idx * 4;
-          data[currentIdx] = r / count;
-          data[currentIdx + 1] = g / count;
-          data[currentIdx + 2] = b / count;
-        }
-      }
-    }
-
-    // Slider functionality
-    function initSlider() {
-      sliderHandle.addEventListener('mousedown', startDragging);
-      sliderHandle.addEventListener('touchstart', startDragging);
-      
-      document.addEventListener('mousemove', drag);
-      document.addEventListener('touchmove', drag);
-      
-      document.addEventListener('mouseup', stopDragging);
-      document.addEventListener('touchend', stopDragging);
-    }
-
-    function startDragging(e) {
-      isDragging = true;
-      e.preventDefault();
-    }
-
-    function drag(e) {
-      if (!isDragging) return;
-      
-      const container = document.getElementById('comparisonImages');
-      const rect = container.getBoundingClientRect();
-      const x = (e.type.includes('touch') ? e.touches[0].clientX : e.clientX) - rect.left;
-      const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
-      
-      updateSliderPosition(percentage);
-    }
-
-    function stopDragging() {
-      isDragging = false;
-    }
-
-    function updateSliderPosition(percentage) {
-      sliderHandle.style.left = percentage + '%';
-      compressedLayer.style.width = percentage + '%';
-    }
-
-    qualitySlider.addEventListener('input', async (e) => {
-      const quality = e.target.value / 100;
-      document.getElementById('qualityValue').textContent = e.target.value + '%';
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
     });
+  }
 
-    qualitySlider.addEventListener('change', async (e) => {
-      const quality = e.target.value / 100;
-      await compressWithQuality(quality);
-    });
+  function downloadCompressed() {
+    if (!currentImage || !currentImage.compressed) return;
+    const url = URL.createObjectURL(currentImage.compressed);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'compressed_' + currentImage.name;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
-    function loadImage(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const img = new Image();
-          img.onload = () => resolve(img);
-          img.onerror = reject;
-          img.src = e.target.result;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
+  function closePreview() {
+    previewModal.classList.remove('active');
+    fileInput.value = '';
+    currentImage = null;
+  }
 
-    function downloadCompressed() {
-      if (!currentImage || !currentImage.compressed) return;
-      
-      const url = URL.createObjectURL(currentImage.compressed);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'compressed_' + currentImage.name;
-      a.click();
-      URL.revokeObjectURL(url);
-    }
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+  }
 
-    function closePreview() {
-      previewModal.classList.remove('active');
-      fileInput.value = '';
-      currentImage = null;
-    }
+  initSlider();
+</script>
 
-    function formatBytes(bytes) {
-      if (bytes === 0) return '0 Bytes';
-      const k = 1024;
-      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
-    }
-
-    initSlider();
-  </script>
 </body>
 </html>

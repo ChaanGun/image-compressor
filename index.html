@@ -621,263 +621,210 @@
     </div>
   </div>
 
- <script type="module">
- 
+<script type="module">
+import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js';
+import * as deeplab from 'https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@3.0.0/dist/deeplab.min.js';
 
-  let currentImage = null;
-  let isDragging = false;
+let currentImage = null;
+let isDragging = false;
+let deeplabModel = null;
 
-  const uploadZone = document.getElementById('uploadZone');
-  const fileInput = document.getElementById('fileInput');
-  const previewModal = document.getElementById('previewModal');
-  const sliderHandle = document.getElementById('sliderHandle');
-  const compressedLayer = document.getElementById('compressedLayer');
-  const qualitySlider = document.getElementById('qualitySlider');
-  const processingOverlay = document.getElementById('processingOverlay');
+// DOM elements
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+const previewModal = document.getElementById('previewModal');
+const sliderHandle = document.getElementById('sliderHandle');
+const compressedLayer = document.getElementById('compressedLayer');
+const qualitySlider = document.getElementById('qualitySlider');
+const processingOverlay = document.getElementById('processingOverlay');
 
-  uploadZone.addEventListener('click', () => fileInput.click());
+// Load AI model
+async function loadSegmentationModel() {
+  deeplabModel = await deeplab.load({ base: 'pascal', quantizationBytes: 2 });
+  console.log("Segmentation model loaded!");
+}
+loadSegmentationModel();
 
-  uploadZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    uploadZone.classList.add('dragover');
+// Upload events
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+  if (files.length > 0) await handleFile(files[0]);
+});
+fileInput.addEventListener('change', async (e) => {
+  if (e.target.files.length > 0) await handleFile(e.target.files[0]);
+});
+
+// Handle selected image
+async function handleFile(file) {
+  currentImage = { file, name: file.name, originalSize: file.size, type: file.type };
+  const img = await loadImage(file);
+  currentImage.img = img;
+
+  document.getElementById('modalTitle').textContent = file.name;
+  document.getElementById('originalImg').src = img.src;
+  document.getElementById('originalSize').textContent = formatBytes(file.size);
+
+  previewModal.classList.add('active');
+  await compressWithQuality(0.8);
+  updateSliderPosition(50); // Initialize slider
+}
+
+// Compress with selected quality (AI selective compression)
+async function compressWithQuality(quality) {
+  processingOverlay.classList.add('active');
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  const compressed = await aiSelectiveCompress(currentImage.img, quality, currentImage.type);
+  currentImage.compressed = compressed.blob;
+  currentImage.compressedSize = compressed.blob.size;
+
+  document.getElementById('compressedImg').src = compressed.dataUrl;
+  document.getElementById('compressedSize').textContent = formatBytes(compressed.blob.size);
+
+  const savings = ((1 - compressed.blob.size / currentImage.originalSize) * 100).toFixed(1);
+  document.getElementById('savings').textContent = savings + '%';
+
+  processingOverlay.classList.remove('active');
+}
+
+// AI-assisted selective compression
+async function aiSelectiveCompress(img, quality, mimeType) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+
+  canvas.width = img.width;
+  canvas.height = img.height;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0);
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const mask = await getSegmentationMask(img);
+
+  applySelectiveCompression(imageData, mask, quality);
+  ctx.putImageData(imageData, 0, 0);
+
+  return new Promise(resolve => {
+    canvas.toBlob((blob) => {
+      resolve({ blob, dataUrl: canvas.toDataURL(mimeType, quality) });
+    }, mimeType, quality);
   });
+}
 
-  uploadZone.addEventListener('dragleave', () => {
-    uploadZone.classList.remove('dragover');
-  });
+// Generate segmentation mask (subject vs background)
+async function getSegmentationMask(img) {
+  if (!deeplabModel) return null;
+  const segmentation = await deeplabModel.segment(img);
+  const width = segmentation.width;
+  const height = segmentation.height;
+  const mask = new Uint8Array(width * height);
 
-  uploadZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    uploadZone.classList.remove('dragover');
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
-    if (files.length > 0) handleFile(files[0]);
-  });
-
-  fileInput.addEventListener('change', (e) => {
-    if (e.target.files.length > 0) handleFile(e.target.files[0]);
-  });
-
-  async function handleFile(file) {
-    currentImage = {
-      file: file,
-      name: file.name,
-      originalSize: file.size,
-      type: file.type
-    };
-
-    const img = await loadImage(file);
-    currentImage.img = img;
-
-    document.getElementById('modalTitle').textContent = file.name;
-    document.getElementById('originalImg').src = img.src;
-    document.getElementById('originalSize').textContent = formatBytes(file.size);
-
-    previewModal.classList.add('active');
-    await compressWithQuality(0.8);
-
-    // Initialize slider position
-    updateSliderPosition(50);
+  // Treat person/foreground objects as subject (keep) and everything else as background (compress)
+  for (let i = 0; i < segmentation.data.length; i++) {
+    mask[i] = (segmentation.data[i] === 15 || segmentation.data[i] === 12) ? 1 : 0; 
   }
+  return mask;
+}
 
-  async function compressWithQuality(quality) {
-    processingOverlay.classList.add('active');
+// Apply blur/averaging only to background pixels
+function applySelectiveCompression(imageData, mask, quality) {
+  const width = imageData.width;
+  const height = imageData.height;
+  const data = imageData.data;
+  const radius = Math.floor((1 - quality) * 5);
 
-    // Simulate processing time for better UX
-    await new Promise(resolve => setTimeout(resolve, 300));
+  if (!mask) return;
 
-    const compressed = await advancedCompress(currentImage.img, quality, currentImage.type);
-    currentImage.compressed = compressed.blob;
-    currentImage.compressedSize = compressed.blob.size;
-
-    document.getElementById('compressedImg').src = compressed.dataUrl;
-    document.getElementById('compressedSize').textContent = formatBytes(compressed.blob.size);
-
-    const savings = ((1 - compressed.blob.size / currentImage.originalSize) * 100).toFixed(1);
-    document.getElementById('savings').textContent = savings + '%';
-
-    processingOverlay.classList.remove('active');
-  }
-
-  async function advancedCompress(img, quality, mimeType) {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-
-    canvas.width = img.width;
-    canvas.height = img.height;
-
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, 0, 0);
-
-    // Get image data for processing
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    // Edge detection and selective compression
-    const edges = detectEdges(imageData);
-    applySelectiveCompression(imageData, edges, quality);
-
-    ctx.putImageData(imageData, 0, 0);
-
-    return new Promise((resolve) => {
-      canvas.toBlob((blob) => {
-        resolve({
-          blob,
-          dataUrl: canvas.toDataURL(mimeType, quality)
-        });
-      }, mimeType, quality);
-    });
-  }
-
-  function detectEdges(imageData) {
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = imageData.data;
-    const edges = new Uint8Array(width * height);
-
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        const idx = (y * width + x) * 4;
-
-        const gx = (
-          -data[idx - 4 - width * 4] + data[idx + 4 - width * 4] +
-          -2 * data[idx - 4] + 2 * data[idx + 4] +
-          -data[idx - 4 + width * 4] + data[idx + 4 + width * 4]
-        );
-
-        const gy = (
-          -data[idx - width * 4 - 4] - 2 * data[idx - width * 4] - data[idx - width * 4 + 4] +
-          data[idx + width * 4 - 4] + 2 * data[idx + width * 4] + data[idx + width * 4 + 4]
-        );
-
-        const magnitude = Math.sqrt(gx * gx + gy * gy);
-        edges[y * width + x] = magnitude > 50 ? 255 : 0;
-      }
-    }
-
-    return edges;
-  }
-
-  function applySelectiveCompression(imageData, edges, quality) {
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = imageData.data;
-    const radius = Math.floor((1 - quality) * 3);
-
-    if (radius < 1) return;
-
-    for (let y = radius; y < height - radius; y++) {
-      for (let x = radius; x < width - radius; x++) {
-        const idx = y * width + x;
-
-        if (edges[idx] > 128) continue;
-
-        let r = 0, g = 0, b = 0, count = 0;
-
-        for (let dy = -radius; dy <= radius; dy++) {
-          for (let dx = -radius; dx <= radius; dx++) {
-            const pixelIdx = ((y + dy) * width + (x + dx)) * 4;
-            r += data[pixelIdx];
-            g += data[pixelIdx + 1];
-            b += data[pixelIdx + 2];
-            count++;
+  for (let y = radius; y < height - radius; y++) {
+    for (let x = radius; x < width - radius; x++) {
+      const idx = (y * width + x) * 4;
+      if (mask[y * width + x] === 0) { // Background
+        let r=0, g=0, b=0, count=0;
+        for (let dy=-radius; dy<=radius; dy++) {
+          for (let dx=-radius; dx<=radius; dx++) {
+            const pixelIdx = ((y+dy)*width + (x+dx))*4;
+            r+=data[pixelIdx]; g+=data[pixelIdx+1]; b+=data[pixelIdx+2]; count++;
           }
         }
-
-        const currentIdx = idx * 4;
-        data[currentIdx] = r / count;
-        data[currentIdx + 1] = g / count;
-        data[currentIdx + 2] = b / count;
+        data[idx] = r/count;
+        data[idx+1] = g/count;
+        data[idx+2] = b/count;
       }
     }
   }
+}
 
-  // Slider functions
-  function initSlider() {
-    sliderHandle.addEventListener('mousedown', startDragging);
-    sliderHandle.addEventListener('touchstart', startDragging);
+// Slider functions
+function initSlider() {
+  sliderHandle.addEventListener('mousedown', startDragging);
+  sliderHandle.addEventListener('touchstart', startDragging);
+  document.addEventListener('mousemove', drag);
+  document.addEventListener('touchmove', drag);
+  document.addEventListener('mouseup', stopDragging);
+  document.addEventListener('touchend', stopDragging);
+}
+function startDragging(e){ isDragging=true; e.preventDefault(); }
+function drag(e){
+  if(!isDragging) return;
+  const container = document.getElementById('comparisonImages');
+  const rect = container.getBoundingClientRect();
+  const x = (e.type.includes('touch') ? e.touches[0].clientX : e.clientX) - rect.left;
+  updateSliderPosition(Math.max(0, Math.min(100, (x/rect.width)*100)));
+}
+function stopDragging(){ isDragging=false; }
+function updateSliderPosition(percentage){
+  sliderHandle.style.left = percentage + '%';
+  compressedLayer.style.width = percentage + '%';
+}
 
-    document.addEventListener('mousemove', drag);
-    document.addEventListener('touchmove', drag);
-
-    document.addEventListener('mouseup', stopDragging);
-    document.addEventListener('touchend', stopDragging);
-  }
-
-  function startDragging(e) {
-    isDragging = true;
-    e.preventDefault();
-  }
-
-  function drag(e) {
-    if (!isDragging) return;
-
-    const container = document.getElementById('comparisonImages');
-    const rect = container.getBoundingClientRect();
-    const x = (e.type.includes('touch') ? e.touches[0].clientX : e.clientX) - rect.left;
-    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
-
-    updateSliderPosition(percentage);
-  }
-
-  function stopDragging() {
-    isDragging = false;
-  }
-
-  function updateSliderPosition(percentage) {
-    sliderHandle.style.left = percentage + '%';
-    compressedLayer.style.width = percentage + '%';
-  }
-
-  qualitySlider.addEventListener('input', async (e) => {
-    const quality = e.target.value / 100;
-    document.getElementById('qualityValue').textContent = e.target.value + '%';
+// Load image as HTMLImageElement
+function loadImage(file) {
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload=(e)=>{
+      const img = new Image();
+      img.onload = ()=>resolve(img);
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
+}
 
-  qualitySlider.addEventListener('change', async (e) => {
-    const quality = e.target.value / 100;
-    await compressWithQuality(quality);
-  });
+// Download compressed image
+function downloadCompressed() {
+  if(!currentImage || !currentImage.compressed) return;
+  const url = URL.createObjectURL(currentImage.compressed);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'compressed_'+currentImage.name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
-  function loadImage(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = e.target.result;
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  }
+// Close preview modal
+function closePreview() {
+  previewModal.classList.remove('active');
+  fileInput.value = '';
+  currentImage=null;
+}
 
-  function downloadCompressed() {
-    if (!currentImage || !currentImage.compressed) return;
+// Format bytes
+function formatBytes(bytes){
+  if(bytes===0) return '0 Bytes';
+  const k=1024; const sizes=['Bytes','KB','MB','GB'];
+  const i=Math.floor(Math.log(bytes)/Math.log(k));
+  return (bytes/Math.pow(k,i)).toFixed(2)+' '+sizes[i];
+}
 
-    const url = URL.createObjectURL(currentImage.compressed);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'compressed_' + currentImage.name;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function closePreview() {
-    previewModal.classList.remove('active');
-    fileInput.value = '';
-    currentImage = null;
-  }
-
-  function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
-  }
-
-  initSlider();
+// Initialize
+initSlider();
 </script>
 
 </body>

@@ -624,6 +624,14 @@
   <script type="module">
 import { ImagePool } from "https://cdn.jsdelivr.net/npm/@squoosh/lib@0.5.0/+esm";
 
+// --- Prevent browser from opening dropped files globally ---
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+  document.addEventListener(eventName, e => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+});
+
 // --- Config ---
 const MAX_DIMENSION = 2500;
 const MAX_PIXELS = 8_000_000;
@@ -662,7 +670,7 @@ uploadZone.addEventListener('dragleave', () => {
 uploadZone.addEventListener('drop', (e) => {
   e.preventDefault();
   uploadZone.classList.remove('dragover');
-  // prefer files, fallback to items
+
   let files = [];
   if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
     files = Array.from(e.dataTransfer.files).filter(f => f.type && f.type.startsWith('image/'));
@@ -672,6 +680,7 @@ uploadZone.addEventListener('drop', (e) => {
       .filter(Boolean)
       .filter(f => f.type && f.type.startsWith('image/'));
   }
+
   if (files.length > 0) handleFile(files[0]);
 });
 
@@ -746,14 +755,12 @@ async function compressWithQuality(quality) {
   }
 }
 
-// --- Advanced compression pipeline (safer, no OffscreenCanvas) ---
+// --- Advanced compression pipeline ---
 async function advancedCompress(img, quality, mimeType) {
   try {
-    // Use standard canvas for maximum compatibility
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    // Determine scale
     let scale = 1;
     if (img.width * img.height > MAX_PIXELS) {
       scale = Math.min(scale, Math.sqrt(MAX_PIXELS / (img.width * img.height)));
@@ -768,11 +775,9 @@ async function advancedCompress(img, quality, mimeType) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // Entropy estimate (safe)
     const entropy = await estimateEntropy(ctx, canvas);
     let targetType = entropy > 5.0 ? 'image/avif' : 'image/webp';
 
-    // Confirm support; fallback to webp
     try {
       const test = document.createElement('canvas').toDataURL(targetType);
       if (!test.startsWith(`data:${targetType}`)) targetType = 'image/webp';
@@ -780,7 +785,6 @@ async function advancedCompress(img, quality, mimeType) {
       targetType = 'image/webp';
     }
 
-    // get a PNG blob (lossless source)
     const sourceBlob = await new Promise((res) => {
       if (canvas.convertToBlob) {
         canvas.convertToBlob({ type: 'image/png' }).then(res).catch(() => canvas.toBlob(res, 'image/png'));
@@ -808,7 +812,6 @@ async function advancedCompress(img, quality, mimeType) {
       return { binary: encoded.binary, mime: encoded.mimeType || targetType, size: encoded.binary.byteLength };
     };
 
-    // First pass
     let chosen;
     try {
       const enc1 = { [codec]: { ...baseEncoders[codec], effort: baseEncoders[codec].effort || 4 } };
@@ -846,7 +849,7 @@ async function advancedCompress(img, quality, mimeType) {
   }
 }
 
-// --- Entropy estimation (sampled) ---
+// --- Entropy estimation ---
 async function estimateEntropy(ctx, canvas) {
   const w = Math.min(canvas.width, ENTROPY_SAMPLE);
   const h = Math.min(canvas.height, ENTROPY_SAMPLE);
@@ -883,7 +886,6 @@ function loadImage(file) {
         const img = new Image();
         img.onload = () => resolve(img);
         img.onerror = (er) => reject(er);
-        // ensure we set crossOrigin to anonymous only if needed; for DataURL it's not needed.
         img.src = e.target.result;
       };
       reader.onerror = (e) => reject(e);
@@ -962,7 +964,7 @@ function updateSliderPosition(percentage) {
 // --- Init ---
 initSlider();
 
-// expose controls for HTML buttons
+// expose controls
 window.handleFile = handleFile;
 window.downloadCompressed = downloadCompressed;
 window.closePreview = closePreview;
